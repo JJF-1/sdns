@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/tls"
 	"net"
+	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/miekg/dns"
 	"github.com/semihalev/sdns/config"
@@ -16,6 +18,7 @@ import (
 type server struct {
 	Addr  string
 	Proto string
+	Name  string
 }
 
 // Forwarder type.
@@ -30,23 +33,40 @@ func New(cfg *config.Config) *Forwarder {
 	forwarderservers := []*server{}
 	for _, s := range cfg.ForwarderServers {
 		srv := &server{Proto: "udp"}
+		raw := s
 
 		if strings.HasPrefix(s, "tls://") {
 			s = strings.TrimPrefix(s, "tls://")
 			srv.Proto = "tcp-tls"
 		}
 
-		host, _, _ := net.SplitHostPort(s)
-
-		if ip := net.ParseIP(host); ip != nil && ip.To4() != nil {
-			srv.Addr = s
-			forwarderservers = append(forwarderservers, srv)
-		} else if ip != nil && ip.To16() != nil {
-			srv.Addr = s
-			forwarderservers = append(forwarderservers, srv)
-		} else {
-			zlog.Error("Forwarder server is not correct. Check your config.", "server", s)
+		host, port, err := net.SplitHostPort(s)
+		if err != nil {
+			zlog.Error("Forwarder server is not correct. Check your config.", "server", raw)
+			continue
 		}
+
+		parsedPort, err := strconv.Atoi(port)
+		if err != nil || parsedPort <= 0 || parsedPort > 65535 {
+			zlog.Error("Forwarder server is not correct. Check your config.", "server", raw)
+			continue
+		}
+
+		if ip := net.ParseIP(host); ip != nil {
+			srv.Addr = net.JoinHostPort(host, port)
+			forwarderservers = append(forwarderservers, srv)
+			continue
+		}
+
+		host = strings.TrimSuffix(host, ".")
+		if !validDomainName(host) {
+			zlog.Error("Forwarder server is not correct. Check your config.", "server", raw)
+			continue
+		}
+
+		srv.Addr = net.JoinHostPort(host, port)
+		srv.Name = host
+		forwarderservers = append(forwarderservers, srv)
 	}
 
 	return &Forwarder{servers: forwarderservers, dnssec: cfg.DNSSEC == "on"}
@@ -79,7 +99,17 @@ func (f *Forwarder) ServeDNS(ctx context.Context, ch *middleware.Chain) {
 	for _, server := range f.servers {
 		reqClient := &dns.Client{Net: server.Proto}
 		if server.Proto == "tcp-tls" {
-			reqClient.TLSConfig = f.tlsConfig
+			if f.tlsConfig != nil {
+				reqClient.TLSConfig = f.tlsConfig.Clone()
+			}
+			if server.Name != "" {
+				if reqClient.TLSConfig == nil {
+					reqClient.TLSConfig = &tls.Config{}
+				}
+				if reqClient.TLSConfig.ServerName == "" {
+					reqClient.TLSConfig.ServerName = server.Name
+				}
+			}
 		}
 
 		resp, err := util.Exchange(ctx, req, server.Addr, server.Proto, reqClient)
@@ -130,6 +160,30 @@ func questionMatches(req dns.Question, resp []dns.Question) bool {
 	}
 	r := resp[0]
 	return r.Qtype == req.Qtype && r.Qclass == req.Qclass && strings.EqualFold(r.Name, req.Name)
+}
+
+func validDomainName(host string) bool {
+	if host == "" || len(host) > 253 {
+		return false
+	}
+
+	labels := strings.Split(host, ".")
+	for _, label := range labels {
+		if len(label) == 0 || len(label) > 63 {
+			return false
+		}
+		if label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, r := range label {
+			if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '-' {
+				continue
+			}
+			return false
+		}
+	}
+
+	return true
 }
 
 const name = "forwarder"
