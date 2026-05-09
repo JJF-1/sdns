@@ -6,7 +6,6 @@ import (
 	"net"
 	"strconv"
 	"strings"
-	"unicode"
 
 	"github.com/miekg/dns"
 	"github.com/semihalev/sdns/config"
@@ -172,11 +171,11 @@ func validDomainName(host string) bool {
 		if len(label) == 0 || len(label) > 63 {
 			return false
 		}
-		if label[0] == '-' || label[len(label)-1] == '-' {
+		if !isASCIILetterDigit(label[0]) || !isASCIILetterDigit(label[len(label)-1]) {
 			return false
 		}
-		for _, r := range label {
-			if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '-' {
+		for i := 1; i < len(label)-1; i++ {
+			if isASCIILetterDigit(label[i]) || label[i] == '-' {
 				continue
 			}
 			return false
@@ -184,6 +183,12 @@ func validDomainName(host string) bool {
 	}
 
 	return true
+}
+
+func isASCIILetterDigit(c byte) bool {
+	return (c >= 'a' && c <= 'z') ||
+		(c >= 'A' && c <= 'Z') ||
+		(c >= '0' && c <= '9')
 }
 
 const name = "forwarder"
