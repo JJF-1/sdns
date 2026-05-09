@@ -108,11 +108,16 @@ func Test_Forwarder(t *testing.T) {
 
 	tlsAddr, stopTLS := startTestDNSServer(t, "tcp-tls")
 	defer stopTLS()
+	_, tlsPort, err := net.SplitHostPort(tlsAddr)
+	if err != nil {
+		t.Fatalf("split tls addr: %v", err)
+	}
+	tlsDomainAddr := net.JoinHostPort("localhost", tlsPort)
 
 	cfg := new(config.Config)
 	// Keep a known-bad entry first to exercise failover, but use local servers
 	// so the test is hermetic and does not require external DNS reachability.
-	cfg.ForwarderServers = []string{"[::255]:53", udpAddr, "1", "tls://" + tlsAddr}
+	cfg.ForwarderServers = []string{"[::255]:53", udpAddr, "1", "tls://" + tlsAddr, "tls://" + tlsDomainAddr}
 
 	middleware.Register("forwarder", func(cfg *config.Config) middleware.Handler { return New(cfg) })
 	middleware.Setup(cfg)
@@ -169,6 +174,14 @@ func Test_Forwarder(t *testing.T) {
 	ch.Next(ctx)
 
 	assert.Equal(t, dns.RcodeSuccess, ch.Writer.Rcode())
+
+	srv = &server{Addr: tlsDomainAddr, Proto: "tcp-tls", Name: "localhost"}
+	f.servers = []*server{srv}
+
+	ch.Reset(mw, req)
+	ch.Next(ctx)
+
+	assert.Equal(t, dns.RcodeSuccess, ch.Writer.Rcode())
 }
 
 // startMismatchedQuestionServer returns a UDP server that always replies with
@@ -216,4 +229,25 @@ func Test_Forwarder_RejectsMismatchedQuestion(t *testing.T) {
 	// drop the response and report SERVFAIL rather than letting an unrelated
 	// answer through to the client (and the cache).
 	assert.Equal(t, dns.RcodeServerFailure, ch.Writer.Rcode())
+}
+
+func Test_New_AcceptsDomainForwarders(t *testing.T) {
+	cfg := &config.Config{
+		ForwarderServers: []string{
+			"1.1.1.1:53",
+			"tls://dns.example.org:853",
+			"tls://localhost.:853",
+			"tls://_bad.example.org:853",
+			"tls://example-.org:853",
+			"dns.example.org",
+			"tls://127.0.0.1:853",
+		},
+	}
+
+	f := New(cfg)
+	assert.Len(t, f.servers, 4)
+	assert.Equal(t, &server{Addr: "1.1.1.1:53", Proto: "udp"}, f.servers[0])
+	assert.Equal(t, &server{Addr: "dns.example.org:853", Proto: "tcp-tls", Name: "dns.example.org"}, f.servers[1])
+	assert.Equal(t, &server{Addr: "localhost:853", Proto: "tcp-tls", Name: "localhost"}, f.servers[2])
+	assert.Equal(t, &server{Addr: "127.0.0.1:853", Proto: "tcp-tls"}, f.servers[3])
 }
