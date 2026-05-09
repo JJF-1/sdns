@@ -2,6 +2,7 @@ package failover
 
 import (
 	"context"
+	"net"
 	"testing"
 
 	"github.com/miekg/dns"
@@ -31,8 +32,31 @@ func Test_Failover(t *testing.T) {
 	logger.SetLevel(zlog.LevelDebug)
 	zlog.SetDefault(logger)
 
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	assert.NoError(t, err)
+	t.Cleanup(func() { _ = pc.Close() })
+
+	srv := &dns.Server{
+		PacketConn: pc,
+		Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+			m := new(dns.Msg)
+			m.SetReply(r)
+
+			if len(r.Question) > 0 && r.Question[0].Qtype == dns.TypeA {
+				m.Answer = append(m.Answer, &dns.A{
+					Hdr: dns.RR_Header{Name: r.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
+					A:   net.IPv4(127, 0, 0, 1),
+				})
+			}
+
+			_ = w.WriteMsg(m)
+		}),
+	}
+	go func() { _ = srv.ActivateAndServe() }()
+	t.Cleanup(func() { _ = srv.Shutdown() })
+
 	cfg := new(config.Config)
-	cfg.FallbackServers = []string{"[::255]:53", "8.8.8.8:53", "1"}
+	cfg.FallbackServers = []string{pc.LocalAddr().String(), "1"}
 
 	middleware.Register("failover", func(cfg *config.Config) middleware.Handler { return New(cfg) })
 	middleware.Setup(cfg)
@@ -62,19 +86,19 @@ func Test_Failover(t *testing.T) {
 	ch.Reset(mw, req)
 	ch.Next(ctx)
 
-	assert.Equal(t, mw.Rcode(), dns.RcodeSuccess)
+	assert.Equal(t, dns.RcodeSuccess, mw.Rcode())
 
 	f.servers = []string{}
 
 	ch.Reset(mw, req)
 	ch.Next(ctx)
 
-	assert.Equal(t, mw.Rcode(), dns.RcodeServerFailure)
+	assert.Equal(t, dns.RcodeServerFailure, mw.Rcode())
 
-	f.servers = []string{"[::255]:53"}
+	f.servers = []string{"127.0.0.1:0"}
 
 	ch.Reset(mw, req)
 	ch.Next(ctx)
 
-	assert.Equal(t, mw.Rcode(), dns.RcodeServerFailure)
+	assert.Equal(t, dns.RcodeServerFailure, mw.Rcode())
 }

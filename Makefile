@@ -1,11 +1,13 @@
 GO ?= go
 BIN = sdns
+MODULE := $(shell $(GO) list -m)
+PKGS := $(shell $(GO) list ./... | grep -v -x "$(MODULE)")
 
 all: generate tidy test build
 
 .PHONY: test
 test:
-	$(GO) test -v -race -covermode=atomic -coverprofile=coverage.out ./...
+	$(GO) test -v -race -covermode=atomic -coverprofile=coverage.out $(PKGS)
 
 .PHONY: generate
 generate:
